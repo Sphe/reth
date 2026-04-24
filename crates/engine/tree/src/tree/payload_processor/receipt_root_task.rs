@@ -105,9 +105,12 @@ impl<R: Receipt> ReceiptRootTaskHandle<R> {
 
         let Ok(root) = builder.finalize() else {
             // Finalize fails if we didn't receive exactly `receipts_len` receipts. This can
-            // happen if execution was aborted early (e.g., invalid transaction encountered).
-            // We return without sending a result, allowing the caller to handle the abort.
-            tracing::error!(
+            // happen if execution was aborted early (e.g., invalid transaction encountered),
+            // OR — on BSC — every block, because system transactions are executed during
+            // post_execution rather than the main loop, so their receipts aren't streamed here.
+            // The validator's fallback path (`verify_receipts` over the full receipts vec) takes
+            // over correctly; downgrading from error → debug to keep BSC logs clean.
+            tracing::debug!(
                 target: "engine::tree::payload_processor",
                 expected = receipts_len,
                 received = received_count,
