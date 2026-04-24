@@ -929,7 +929,12 @@ where
             receipt_root_rx
                 .blocking_recv()
                 .inspect_err(|_| {
-                    tracing::error!(
+                    // Downgraded from error -> debug because on BSC this fires every block:
+                    // system transactions are executed during post_execution, not the main loop,
+                    // so the streaming receipt-root task always gets fewer receipts than expected
+                    // and aborts. The fallback path (verify_receipts over the full receipts vec
+                    // returned by executor.finish()) handles correctness fine.
+                    tracing::debug!(
                         target: "engine::tree::payload_validator",
                         "Receipt root task dropped sender without result, receipt root calculation likely aborted"
                     );
