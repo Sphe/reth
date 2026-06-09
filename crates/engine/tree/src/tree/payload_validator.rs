@@ -1292,14 +1292,20 @@ where
         let execution_start = Instant::now();
 
         // Execute all transactions and finalize
-        let (executor, senders) = self.execute_transactions(
+        let (executor, senders, streamed_receipts) = self.execute_transactions(
             executor,
             transaction_count,
             handle.iter_transactions(),
             &receipt_tx,
             &executed_tx_index,
         )?;
-        drop(receipt_tx);
+        // NOTE: `receipt_tx` is intentionally kept open across `finish()`.
+        // Some executors (BSC/Parlia) defer system transactions to
+        // finalization and append their receipts there — closing the channel
+        // here would leave the receipt-root task short by those receipts on
+        // EVERY block, aborting the fast path and forcing a full fallback
+        // recomputation. The deferred receipts are streamed right after
+        // `finish()` below.
 
         // Finish execution and get the result
         let post_exec_start = Instant::now();
@@ -1307,6 +1313,14 @@ where
             .in_scope(|| executor.finish())
             .map(|(evm, result)| (evm.into_db(), result))?;
         self.metrics.record_post_execution(post_exec_start.elapsed());
+
+        // Stream receipts appended during finalization (system transactions),
+        // then close the channel so the receipt-root task can finalize. For
+        // executors with no deferred receipts this loop is a no-op.
+        for (index, receipt) in result.receipts.iter().enumerate().skip(streamed_receipts) {
+            let _ = receipt_tx.send(IndexedReceipt::new(index, receipt.clone()));
+        }
+        drop(receipt_tx);
 
         // Merge transitions into bundle state
         debug_span!(target: "engine::tree", "merge_transitions")
@@ -1338,7 +1352,7 @@ where
         transactions: impl Iterator<Item = Result<Tx, Err>>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         executed_tx_index: &AtomicUsize,
-    ) -> Result<(E, Vec<Address>), BlockExecutionError>
+    ) -> Result<(E, Vec<Address>, usize), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt>,
         Tx: alloy_evm::block::ExecutableTx<E> + alloy_evm::RecoveredTx<InnerTx>,
@@ -1400,7 +1414,10 @@ where
         }
         drop(exec_span);
 
-        Ok((executor, senders))
+        // Returned so the caller can stream receipts that executors append
+        // during finalization (deferred system transactions) starting at the
+        // right index.
+        Ok((executor, senders, last_sent_len))
     }
 
     /// Compute state root for the given hashed post state in parallel.
